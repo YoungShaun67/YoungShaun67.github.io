@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Swing City | ARCADEHAUS</title>
+<style>
+:root{--bg:#f2efe8;--fg:#1d1d22;--muted:#5b5b66;color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14141a;--fg:#ecebf2;--muted:#a3a3b0;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#14141a;--fg:#ecebf2;--muted:#a3a3b0;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-monospace,Consolas,monospace}
+main{max-width:960px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0 0 12px}
+canvas{display:block;width:100%;aspect-ratio:16/9;image-rendering:pixelated;border-radius:8px;outline:none;touch-action:none}
+p{color:var(--muted);font-size:13px;line-height:1.6}
+b{color:var(--fg)}
+</style>
+</head>
+<body>
+<main>
+<p><a href="games/swing-city/index.html" style="color:inherit">&larr; Back to ARCADEHAUS</a></p>
+<h1>Swing City</h1>
+<canvas id="g" tabindex="0"></canvas>
+<p><b>Click the game first</b> so it gets your keys. Hold <b>SPACE</b> for auto-web · click a building for a manual web · <b>A/D</b> or arrows to steer · <b>W/S</b> to reel in/out · hold <b>SHIFT</b> to hang upside down · <b>R</b> to restart. On touch: hold a finger down to web.</p>
+</main>
+<script>
+(()=>{
+const cv=document.getElementById('g'),ctx=cv.getContext('2d');
+const W=320,H=180;cv.width=W;cv.height=H;ctx.imageSmoothingEnabled=false;
+
+// ---- settings ----
+const G=600,MAX_WEB=150,GROUND=400,DRAG=.15,STEER=250,REEL=80,MIN_ROPE=30;
+
+// ---- seeded random so the city is the same every time ----
+function mulberry32(a){return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+const rnd=mulberry32(3),ri=(a,b)=>a+Math.floor(rnd()*(b-a+1));
+
+// ---- buildings ----
+const B=[];
+for(let x=-200;x<8000;){const w=ri(40,80),h=ri(120,330);B.push({x,y:GROUND-h,w,h});x+=w+ri(30,70)}
+const hit=(x,y)=>B.some(b=>x>=b.x&&x<b.x+b.w&&y>=b.y&&y<b.y+b.h);
+
+// ---- sprites (one letter = one pixel) ----
+const PAL={K:'#0f0f14',R:'#d21414',B:'#195aaa',W:'#f0f0f0'};
+const g=s=>s.trim().split(/\s+/);
+const mk=rows=>{const c=document.createElement('canvas');c.width=14;c.height=rows.length;const x=c.getContext('2d');
+rows.forEach((r,j)=>[...r].forEach((ch,i)=>{if(PAL[ch]){x.fillStyle=PAL[ch];x.fillRect(i,j,1,1)}}));return c};
+const HEAD=g(`....KKKKKK.... ..KKRRRRRRKK.. .KRRRRRRRRRRK. KRRRRRRRRRRRRK KRKKKKRRKKKKRK KKWWWKKKKWWWKK KRKWWKRRKWWKRK KRRKKRRRRKKRRK ..KKRRRRRRKK..`);
+const STAND=g(`.KBBKRRRRKBBK. KBBBKRRRRKBBBK KBBBKRWWRKBBBK KBBKKRRRRKKBBK KRRKKRRRRKKRRK .KKKRRRRRRKKK. ...KRRRRRRK... ...KRRKKRRK... ...KRRKKRRK... ...KBBKKBBK... ...KKKKKKKK...`);
+const FALL=g(`KBBBKRRRRKBBBK KBBKKRWWRKKBBK KRK.KRRRRK.KRK .K..KRRRRK..K. ...KKRRRRKK... ..KRRRRRRRRK.. .KRRK....KRRK. .KRRK....KRRK. KBBK......KBBK KKKK......KKKK ..............`);
+const SWING=g(`.KBBKRRRRKBBK. KBBBKRRRRKBBBK KBBBKRWWRKBBBK KRRKKRRRRKKRRK .KKKRRRRRRKKK. ...KRRRRRRK... ....KRRRRK.... ....KRRRRK.... ....KRRRRK.... ....KBBBBK.... ....KKKKKK....`);
+const LAND=g(`.KBBKRRRRKBBK. KBBBKRWWRKBBBK KRRKKRRRRKKRRK .KKKRRRRRRKKK. ..KRRRRRRRRK.. .KRRRRKKRRRRK. .KBBBBKKBBBBK. .KKKKKKKKKKKK.`);
+const BL=['..............'];
+const imgStand=mk([...HEAD,...STAND]),imgFall=mk([...HEAD,...FALL]),imgSwing=mk([...HEAD,...SWING]),imgLand=mk([...BL,...BL,...BL,...HEAD,...LAND]);
+
+// ---- state ----
+let px=100,py=120,vx=80,vy=0,ax=null,ay=0,rope=0,camx=0,camy=0,onG=false,wasG=false,land=0;
+const keys={};
+
+function tryAttach(mx,my){
+  if(hit(mx,my)&&Math.hypot(px-mx,py-my)<=MAX_WEB){ax=mx;ay=my;rope=Math.hypot(px-ax,py-ay)}
+}
+function autoAttach(){
+  const f=vx>=0?1:-1;let best=null;
+  for(const sl of[.8,1.4,2.5]){
+    const l=Math.hypot(1,sl),dx=f/l,dy=-sl/l;
+    for(let d=10;d<=MAX_WEB;d+=4){
+      const x=px+dx*d,y=py+dy*d;
+      if(hit(x,y)){if(!best||y<best.y)best={x,y};break}
+    }
+  }
+  if(best){ax=best.x;ay=best.y;rope=Math.hypot(px-ax,py-ay)}
+}
+
+// ---- input ----
+addEventListener('keydown',e=>{
+  if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();
+  keys[e.code]=true;
+  if(e.code==='Space'&&!e.repeat)autoAttach();
+  if(e.code==='KeyR'){px=100;py=120;vx=80;vy=0;ax=null}
+});
+addEventListener('keyup',e=>{keys[e.code]=false;if(e.code==='Space')ax=null});
+cv.addEventListener('pointerdown',e=>{
+  cv.focus();
+  if(e.pointerType==='touch'){autoAttach();return}
+  if(e.button!==0)return;
+  const r=cv.getBoundingClientRect();
+  tryAttach((e.clientX-r.left)/r.width*W+camx,(e.clientY-r.top)/r.height*H+camy);
+});
+addEventListener('pointerup',()=>{ax=null});
+addEventListener('pointercancel',()=>{ax=null});
+
+// ---- main loop ----
+let last=performance.now();
+function frame(now){
+  const dt=Math.min((now-last)/1000,.033);last=now;
+
+  // physics
+  vy+=G*dt;
+  if(keys.ArrowLeft||keys.KeyA)vx-=STEER*dt;
+  if(keys.ArrowRight||keys.KeyD)vx+=STEER*dt;
+  vx*=1-DRAG*dt;vy*=1-DRAG*dt;
+  if(ax!==null){
+    if(keys.KeyW||keys.ArrowUp)rope=Math.max(MIN_ROPE,rope-REEL*dt);
+    if(keys.KeyS||keys.ArrowDown)rope=Math.min(MAX_WEB,rope+REEL*dt);
+  }
+  px+=vx*dt;py+=vy*dt;
+
+  // pendulum: the web is a rope that can't stretch
+  if(ax!==null){
+    const dx=px-ax,dy=py-ay,d=Math.hypot(dx,dy);
+    if(d>rope){
+      const nx=dx/d,ny=dy/d;
+      px=ax+nx*rope;py=ay+ny*rope;
+      const away=vx*nx+vy*ny;
+      if(away>0){vx-=nx*away;vy-=ny*away}
+    }
+  }
+
+  // rooftops (walls are ghosts) + street
+  onG=false;
+  for(const b of B){
+    const feet=py+10;
+    if(px>b.x&&px<b.x+b.w&&vy>0&&feet>=b.y&&feet<=b.y+25){py=b.y-10;vy=0;vx*=.9;onG=true}
+  }
+  if(py>GROUND-10){py=GROUND-10;vy=0;vx*=.9;onG=true}
+  if(onG&&!wasG)land=.15;
+  wasG=onG;land=Math.max(0,land-dt);
+
+  // camera
+  camx+=(px-W/2-camx)*.1;camy+=(py-H*.62-camy)*.1;
+
+  // draw
+  ctx.fillStyle='#5a8cc8';ctx.fillRect(0,0,W,H);
+  const baseY=(GROUND-camy)*.8+30;                    // far skyline (parallax)
+  ctx.fillStyle='#4b79b0';
+  for(let i=-1;i<W/24+2;i++){
+    const wi=Math.floor(camx*.3/24)+i,h=30+(((wi*37)%5)+5)%5*14;
+    ctx.fillRect(Math.round(wi*24-camx*.3),Math.round(baseY-h),22,h);
+  }
+  B.forEach((b,bi)=>{
+    const sx=Math.round(b.x-camx),sy=Math.round(b.y-camy);
+    if(sx+b.w<0||sx>W)return;
+    ctx.fillStyle='#282840';ctx.fillRect(sx,sy,b.w,b.h);
+    ctx.fillStyle='#3a3a5a';ctx.fillRect(sx-1,sy,b.w+2,3);             // roof trim
+    let i=0;
+    for(let wx=sx+6;wx<sx+b.w-6;wx+=12,i++){
+      let j=0;
+      for(let wy=sy+8;wy<sy+b.h-8;wy+=16,j++){
+        if(wy<-8||wy>H)continue;
+        ctx.fillStyle=(bi*7+i*3+j*5)%4?'#e6d278':'#34344e';              // some windows dark
+        ctx.fillRect(wx,wy,5,8);
+      }
+    }
+  });
+  ctx.fillStyle='#1e1e1e';ctx.fillRect(0,Math.round(GROUND-camy),W,300);   // street
+
+  const sx=Math.round(px-camx),sy=Math.round(py-camy);
+  if(ax!==null){                                                          // web line
+    ctx.strokeStyle='#f0f0f0';ctx.lineWidth=1;ctx.beginPath();
+    ctx.moveTo(sx+.5,sy+.5);ctx.lineTo(Math.round(ax-camx)+.5,Math.round(ay-camy)+.5);ctx.stroke();
+  }
+  let img,rot=0,flip=1;
+  if(ax!==null){
+    img=imgSwing;rot=Math.atan2(ax-px,-(ay-py));
+    if(keys.ShiftLeft||keys.ShiftRight)flip=-1;                           // upside-down hang
+  }else if(land>0)img=imgLand;
+  else if(onG)img=imgStand;
+  else img=imgFall;
+  ctx.save();ctx.translate(sx,sy);ctx.rotate(rot);ctx.scale(1,flip);ctx.drawImage(img,-7,-10);ctx.restore();
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
